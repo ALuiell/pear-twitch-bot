@@ -2,6 +2,7 @@ import re
 import time
 import urllib.parse
 from dataclasses import dataclass
+import httpx
 
 from PySide6.QtCore import QObject, Signal, Slot
 
@@ -25,6 +26,8 @@ class ViewerQueueEntry:
     video_id: str
     label: str
     requested_at: float
+    artist: str = ""
+    title: str = ""
 
 
 class SongRequestService(QObject):
@@ -107,8 +110,8 @@ class SongRequestService(QObject):
         try:
             video_id = self._extract_video_id(args)
         except ValueError as exc:
-            if self._user_has_active_request(user_login):
-                self.send_chat_message.emit(f"@{user_login}, you already have a pending request.")
+            if self._user_has_reached_limit(user_login):
+                self.send_chat_message.emit(self._limit_message(user_login))
                 return
             if self._looks_like_url(args):
                 self.send_chat_message.emit(f"@{user_login}, only YouTube links or plain text search queries are allowed.")
@@ -120,15 +123,16 @@ class SongRequestService(QObject):
             self.request_pear_search.emit(request_id, args)
             return
 
-        self._queue_viewer_track(user_login, video_id, args)
+        artist, title = self._resolve_youtube_metadata(value=args, video_id=video_id)
+        self._queue_viewer_track(user_login, video_id, args, artist=artist, title=title)
 
-    def _queue_viewer_track(self, user_login: str, video_id: str, label: str):
+    def _queue_viewer_track(self, user_login: str, video_id: str, label: str, artist: str = "", title: str = ""):
         if self.config.song_requests.reject_duplicates and self._video_id_is_queued(video_id):
             self.send_chat_message.emit(f"@{user_login}, this track is already in the viewer queue.")
             return
 
-        if self._user_has_active_request(user_login):
-            self.send_chat_message.emit(f"@{user_login}, you already have a pending request.")
+        if self._user_has_reached_limit(user_login):
+            self.send_chat_message.emit(self._limit_message(user_login))
             return
 
         entry = ViewerQueueEntry(
@@ -136,6 +140,8 @@ class SongRequestService(QObject):
             user_login=user_login,
             video_id=video_id,
             label=label.strip(),
+            artist=artist.strip(),
+            title=title.strip(),
             requested_at=time.time(),
         )
         self.viewer_queue.append(entry)
@@ -143,10 +149,11 @@ class SongRequestService(QObject):
         self.user_last_success[user_login] = time.monotonic()
 
         position = len(self.viewer_queue)
+        track_display = self._format_track_display(entry)
         if position == 1:
-            self.send_chat_message.emit(f"@{user_login}, added to the viewer queue. You're up next.")
+            self.send_chat_message.emit(f"@{user_login}, added {track_display} to the viewer queue. You're up next.")
         else:
-            self.send_chat_message.emit(f"@{user_login}, added to the viewer queue at position {position}.")
+            self.send_chat_message.emit(f"@{user_login}, added {track_display} to the viewer queue at position {position}.")
 
         self.log_message.emit("info", f"Queued viewer track {video_id} for {user_login}")
         self._dispatch_next_viewer_track()
@@ -165,18 +172,22 @@ class SongRequestService(QObject):
             self.prepared_video_id = None
             self.log_message.emit("warning", f"Failed to dispatch viewer track: {error}")
 
-    @Slot(str, str)
-    def handle_search_completed(self, request_id: str, video_id: str):
+    @Slot(str, object)
+    def handle_search_completed(self, request_id: str, result: object):
         pending = self.pending_searches.pop(request_id, None)
         if not pending:
             return
 
         user_login, label = pending
+        metadata = result if isinstance(result, dict) else {}
+        video_id = str(metadata.get("videoId", "")).strip()
         if not video_id:
             self.send_chat_message.emit(f"@{user_login}, could not find any track for your search.")
             return
 
-        self._queue_viewer_track(user_login, video_id, label)
+        artist = str(metadata.get("artist", "")).strip()
+        title = str(metadata.get("title", "")).strip()
+        self._queue_viewer_track(user_login, video_id, label, artist=artist, title=title)
 
     @Slot(str, object)
     def handle_queue_fetched(self, user_login: str, queue_data: object):
@@ -245,6 +256,14 @@ class SongRequestService(QObject):
             self.prepared_video_id = None
             self.log_message.emit("warning", f"Queue operation failed: {error}")
 
+    @Slot()
+    def clear_local_queue(self):
+        self.viewer_queue.clear()
+        self.pending_searches.clear()
+        self.pending_dispatch_request_id = None
+        self.prepared_video_id = None
+        self.log_message.emit("info", "Viewer queue cleared from the dashboard.")
+
     def _dispatch_next_viewer_track(self):
         if not self.viewer_queue or self.pending_dispatch_request_id:
             return
@@ -282,7 +301,7 @@ class SongRequestService(QObject):
 
         preview = []
         for index, entry in enumerate(self.viewer_queue[:3], start=1):
-            label = entry.label
+            label = self._format_track_display(entry)
             if len(label) > 30:
                 label = label[:27] + "..."
             preview.append(f"{index}. {label}")
@@ -306,13 +325,53 @@ class SongRequestService(QObject):
                 self.prepared_video_id = None
             self._dispatch_next_viewer_track()
 
-    def _user_has_active_request(self, user_login: str) -> bool:
-        if any(entry.user_login == user_login for entry in self.viewer_queue):
-            return True
-        return any(pending_user == user_login for pending_user, _ in self.pending_searches.values())
+    def _user_has_reached_limit(self, user_login: str) -> bool:
+        limit = self.config.song_requests.max_active_per_user
+        if limit is None:
+            return False
+        return self._active_request_count(user_login) >= limit
+
+    def _active_request_count(self, user_login: str) -> int:
+        queue_count = sum(1 for entry in self.viewer_queue if entry.user_login == user_login)
+        pending_search_count = sum(1 for pending_user, _ in self.pending_searches.values() if pending_user == user_login)
+        return queue_count + pending_search_count
+
+    def _limit_message(self, user_login: str) -> str:
+        limit = self.config.song_requests.max_active_per_user
+        if limit == 1:
+            return f"@{user_login}, you already have a pending request."
+        return f"@{user_login}, you already reached the active request limit."
 
     def _video_id_is_queued(self, video_id: str) -> bool:
         return any(entry.video_id == video_id for entry in self.viewer_queue)
+
+    def _format_track_display(self, entry: ViewerQueueEntry) -> str:
+        if entry.artist and entry.title:
+            return f"{entry.artist}: {entry.title}"
+        if entry.title:
+            return entry.title
+        return entry.label
+
+    def _resolve_youtube_metadata(self, value: str, video_id: str) -> tuple[str, str]:
+        if not self._looks_like_url(value):
+            return "", ""
+
+        lookup_url = f"https://www.youtube.com/watch?v={video_id}"
+        try:
+            response = httpx.get(
+                "https://www.youtube.com/oembed",
+                params={"url": lookup_url, "format": "json"},
+                timeout=3,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return (
+                str(data.get("author_name", "")).strip(),
+                str(data.get("title", "")).strip(),
+            )
+        except Exception as exc:
+            self.log_message.emit("debug", f"Failed to resolve YouTube metadata for {video_id}: {exc}")
+            return "", ""
 
     def _get_current_index_and_next_video(self) -> tuple[int | None, str | None]:
         items = self.last_queue_data.get("items", []) if isinstance(self.last_queue_data, dict) else []

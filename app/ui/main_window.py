@@ -48,6 +48,9 @@ class MainWindow(QMainWindow):
         self._setup_ui()
         self._connect_signals()
         self._recent_logs: dict[tuple[str, str], tuple[float, int]] = {}
+        self._settings_dirty = False
+        self._syncing_ui = False
+        self.btn_pear_pause.hide()
         
         # Route standard python logs to the UI text box
         self.log_emitter = LogEmitter()
@@ -245,8 +248,11 @@ class MainWindow(QMainWindow):
         self.btn_pear_pause.setObjectName("PlayerBtn")
         self.btn_pear_next = QPushButton("⏭")
         self.btn_pear_next.setObjectName("PlayerBtn")
+        self.btn_pear_clear = QPushButton("🗑")
+        self.btn_pear_clear.setObjectName("PlayerBtn")
+        self.btn_pear_clear.setToolTip("Clear Queue")
         
-        for btn in (self.btn_pear_play, self.btn_pear_pause, self.btn_pear_next):
+        for btn in (self.btn_pear_play, self.btn_pear_pause, self.btn_pear_next, self.btn_pear_clear):
             p_btn_row.addWidget(btn)
             
         player_card_layout.addLayout(p_btn_row)
@@ -278,33 +284,37 @@ class MainWindow(QMainWindow):
         form_layout.setContentsMargins(0, 8, 0, 8)
         
         self.chk_enabled = QCheckBox("Enable !song commands")
-        self.chk_enabled.toggled.connect(self._on_settings_changed)
+        self.chk_enabled.toggled.connect(self._mark_settings_dirty)
         
         self.chk_queue = QCheckBox("Enable !queue command")
-        self.chk_queue.toggled.connect(self._on_settings_changed)
+        self.chk_queue.toggled.connect(self._mark_settings_dirty)
         
         self.chk_current = QCheckBox("Enable !current command")
-        self.chk_current.toggled.connect(self._on_settings_changed)
+        self.chk_current.toggled.connect(self._mark_settings_dirty)
         
         self.chk_skip = QCheckBox("Enable !skip command")
-        self.chk_skip.toggled.connect(self._on_settings_changed)
+        self.chk_skip.toggled.connect(self._mark_settings_dirty)
         
         self.chk_remove = QCheckBox("Enable !remove command")
-        self.chk_remove.toggled.connect(self._on_settings_changed)
+        self.chk_remove.toggled.connect(self._mark_settings_dirty)
         
         self.txt_channel = QLineEdit()
         self.txt_channel.setPlaceholderText("e.g. your_twitch_name")
-        self.txt_channel.textChanged.connect(self._on_settings_changed)
+        self.txt_channel.textChanged.connect(self._mark_settings_dirty)
         
         self.spin_global = QSpinBox()
         self.spin_global.setRange(0, 3600)
         self.spin_global.setSuffix(" seconds")
-        self.spin_global.valueChanged.connect(self._on_settings_changed)
+        self.spin_global.valueChanged.connect(self._mark_settings_dirty)
         
         self.spin_user = QSpinBox()
         self.spin_user.setRange(0, 86400)
         self.spin_user.setSuffix(" seconds")
-        self.spin_user.valueChanged.connect(self._on_settings_changed)
+        self.spin_user.valueChanged.connect(self._mark_settings_dirty)
+
+        self.txt_max_active = QLineEdit()
+        self.txt_max_active.setPlaceholderText("empty = unlimited")
+        self.txt_max_active.textChanged.connect(self._mark_settings_dirty)
         
         form_layout.addRow("", self.chk_enabled)
         form_layout.addRow("", self.chk_queue)
@@ -314,8 +324,17 @@ class MainWindow(QMainWindow):
         form_layout.addRow("Target Channel:", self.txt_channel)
         form_layout.addRow("Global Cooldown:", self.spin_global)
         form_layout.addRow("User Cooldown:", self.spin_user)
+        form_layout.addRow("Max Active Per User:", self.txt_max_active)
         
         req_card_layout.addLayout(form_layout)
+        settings_actions = QHBoxLayout()
+        settings_actions.addStretch()
+        self.btn_save_settings = QPushButton("Save Settings")
+        self.btn_save_settings.setObjectName("StartBotBtn")
+        self.btn_save_settings.clicked.connect(self._save_settings)
+        self.btn_save_settings.setEnabled(False)
+        settings_actions.addWidget(self.btn_save_settings)
+        req_card_layout.addLayout(settings_actions)
         settings_layout.addWidget(req_card)
         self.stacked_widget.addWidget(settings_widget)
         
@@ -373,6 +392,7 @@ class MainWindow(QMainWindow):
         self.txt_logs.clear()
 
     def _sync_ui_with_config(self):
+        self._syncing_ui = True
         cfg = self.config.song_requests
         self.chk_enabled.setChecked(cfg.enabled)
         self.chk_queue.setChecked(cfg.enable_queue_cmd)
@@ -382,6 +402,9 @@ class MainWindow(QMainWindow):
         self.txt_channel.setText(self.config.twitch.target_channel)
         self.spin_global.setValue(cfg.global_cooldown_seconds)
         self.spin_user.setValue(cfg.user_cooldown_seconds)
+        self.txt_max_active.setText("" if cfg.max_active_per_user is None else str(cfg.max_active_per_user))
+        self._syncing_ui = False
+        self._set_settings_dirty(False)
         
         if self.config.twitch.username:
             self._update_status(self.auth_dot, self.lbl_auth_status, "Auth", "connected", self.config.twitch.username)
@@ -395,9 +418,9 @@ class MainWindow(QMainWindow):
         self.btn_start_bot.clicked.connect(self.twitch_ctrl.start_bot)
         self.btn_stop_bot.clicked.connect(self.twitch_ctrl.stop_bot)
         
-        self.btn_pear_play.clicked.connect(self.pear_worker.command_play)
-        self.btn_pear_pause.clicked.connect(self.pear_worker.command_pause)
+        self.btn_pear_play.clicked.connect(self.pear_worker.command_toggle_play)
         self.btn_pear_next.clicked.connect(self.pear_worker.command_next)
+        self.btn_pear_clear.clicked.connect(self.pear_worker.command_clear_queue)
 
         # Twitch Controller
         self.twitch_ctrl.auth_state_changed.connect(self._on_auth_state_changed)
@@ -411,6 +434,8 @@ class MainWindow(QMainWindow):
         self.pear_worker.state_changed.connect(self._on_pear_state_changed)
         self.pear_worker.current_song_updated.connect(self._on_current_song_updated)
         self.pear_worker.queue_updated.connect(self._on_queue_updated)
+        self.pear_worker.clear_queue_completed.connect(self._on_clear_queue_completed)
+        self.pear_worker.clear_queue_failed.connect(self._on_clear_queue_failed)
 
     @Slot(bool, str)
     def _on_auth_state_changed(self, is_auth: bool, username: str):
@@ -447,6 +472,7 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _on_current_song_updated(self, song: dict | None):
+        self._update_toggle_button_label(song)
         if song and "title" in song:
             author = song.get("author") or song.get("artist")
             if author:
@@ -455,6 +481,27 @@ class MainWindow(QMainWindow):
                 self.lbl_current_song.setText(song['title'])
         else:
             self.lbl_current_song.setText("None")
+
+    def _update_toggle_button_label(self, song: dict | None):
+        if not isinstance(song, dict) or not song:
+            self.btn_pear_play.setText("▶")
+            return
+
+        if song.get("isPaused") is True:
+            self.btn_pear_play.setText("▶")
+        elif song.get("isPaused") is False:
+            self.btn_pear_play.setText("⏸")
+        else:
+            self.btn_pear_play.setText("▶")
+
+    @Slot()
+    def _on_clear_queue_completed(self):
+        self.song_srv.clear_local_queue()
+        self.append_log("info", "Pear queue cleared.")
+
+    @Slot(str)
+    def _on_clear_queue_failed(self, error: str):
+        self.append_log("warning", f"Failed to clear Pear queue: {error}")
 
     @Slot(object)
     def _on_queue_updated(self, queue_data: dict):
@@ -539,9 +586,12 @@ class MainWindow(QMainWindow):
             (r"^Failed to send next command: .+$", "Pear API: failed to skip to the next track."),
             (r"^Failed to send pause command: .+$", "Pear API: failed to pause playback."),
             (r"^Failed to send play command: .+$", "Pear API: failed to resume playback."),
+            (r"^Failed to send play/pause toggle command: .+$", "Pear API: failed to toggle playback."),
+            (r"^Failed to clear queue: .+$", "Pear API: failed to clear the queue."),
             (r"^Failed to remove song: .+$", "Pear API: failed to remove a track."),
             (r"^Failed to move song: .+$", "Pear API: failed to reorder a track."),
             (r"^Failed to search song: .+$", "Pear API: search request failed."),
+            (r"^Viewer queue cleared from the dashboard\.$", "Viewer queue: local queue cleared."),
             (r"^Rejected invalid URL from (\w+): .+$", "Request rejected: invalid non-YouTube link from @\\1."),
             (r"^Starting Twitch Pear Song Requests\.\.\.$", "Application started."),
         ]
@@ -567,7 +617,19 @@ class MainWindow(QMainWindow):
         return False
 
     @Slot()
-    def _on_settings_changed(self):
+    def _mark_settings_dirty(self):
+        if self._syncing_ui:
+            return
+        self._set_settings_dirty(True)
+
+    def _set_settings_dirty(self, is_dirty: bool):
+        self._settings_dirty = is_dirty
+        if hasattr(self, "btn_save_settings"):
+            self.btn_save_settings.setEnabled(is_dirty)
+            self.btn_save_settings.setText("Save Settings*" if is_dirty else "Save Settings")
+
+    @Slot()
+    def _save_settings(self):
         self.config.twitch.target_channel = self.txt_channel.text().strip()
         
         cfg = self.config.song_requests
@@ -578,7 +640,18 @@ class MainWindow(QMainWindow):
         cfg.enable_remove_cmd = self.chk_remove.isChecked()
         cfg.global_cooldown_seconds = self.spin_global.value()
         cfg.user_cooldown_seconds = self.spin_user.value()
+        raw_limit = self.txt_max_active.text().strip()
+        if not raw_limit:
+            cfg.max_active_per_user = None
+        else:
+            try:
+                parsed_limit = int(raw_limit)
+            except ValueError:
+                parsed_limit = 1
+            cfg.max_active_per_user = None if parsed_limit <= 0 else parsed_limit
         save_config(self.config)
+        self._set_settings_dirty(False)
+        self.append_log("info", "Settings saved.")
 
     def closeEvent(self, event):
         self.twitch_ctrl.stop_bot()

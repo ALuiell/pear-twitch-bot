@@ -100,6 +100,15 @@ class PearClient:
             logger.error(f"Failed to send pause command: {e}")
             return False
 
+    def command_toggle_play(self) -> bool:
+        try:
+            res = self._request("POST", "/api/v1/toggle-play")
+            res.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send play/pause toggle command: {e}")
+            return False
+
     def command_next(self) -> bool:
         try:
             res = self._request("POST", "/api/v1/next")
@@ -118,6 +127,15 @@ class PearClient:
             logger.error(f"Failed to remove song: {e}")
             return False
 
+    def clear_queue(self) -> bool:
+        try:
+            res = self._request("DELETE", "/api/v1/queue")
+            res.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to clear queue: {e}")
+            return False
+
     def move_song(self, index: int, to_index: int) -> bool:
         try:
             res = self._request("PATCH", f"/api/v1/queue/{index}", json={"toIndex": to_index})
@@ -127,25 +145,80 @@ class PearClient:
             logger.error(f"Failed to move song: {e}")
             return False
 
-    def search_song(self, query: str) -> str | None:
+    def search_song(self, query: str) -> dict[str, str] | None:
         try:
             res = self._request("POST", "/api/v1/search", json={"query": query})
             res.raise_for_status()
             data = res.json()
-            
-            def find_first_video_id(obj):
+
+            def extract_text(value: Any) -> str:
+                if isinstance(value, str):
+                    return value.strip()
+                if isinstance(value, dict):
+                    runs = value.get("runs")
+                    if isinstance(runs, list):
+                        return "".join(
+                            part.get("text", "")
+                            for part in runs
+                            if isinstance(part, dict)
+                        ).strip()
+                    text = value.get("text")
+                    if isinstance(text, str):
+                        return text.strip()
+                return ""
+
+            def extract_artist(value: Any) -> str:
+                if not isinstance(value, dict):
+                    return ""
+
+                runs = value.get("runs", [])
+                if not isinstance(runs, list):
+                    return ""
+
+                for run in runs:
+                    if not isinstance(run, dict):
+                        continue
+                    text = run.get("text", "").strip()
+                    endpoint = run.get("navigationEndpoint", {})
+                    if text and isinstance(endpoint, dict) and endpoint.get("browseEndpoint"):
+                        return text
+
+                ignored_values = {"video", "song", "album", "single", "ep"}
+                for run in runs:
+                    if not isinstance(run, dict):
+                        continue
+                    text = run.get("text", "").strip()
+                    normalized = text.lower()
+                    if text and text != "•" and normalized not in ignored_values:
+                        return text
+
+                return ""
+
+            def find_first_track(obj: Any) -> dict[str, str] | None:
                 if isinstance(obj, dict):
-                    if 'videoId' in obj: return obj['videoId']
-                    for k, v in obj.items():
-                        r = find_first_video_id(v)
-                        if r: return r
+                    video_id = obj.get("videoId")
+                    if isinstance(video_id, str) and video_id:
+                        title = extract_text(obj.get("title"))
+                        artist = extract_artist(obj.get("subtitle")) or extract_artist(obj.get("shortBylineText"))
+
+                        return {
+                            "videoId": video_id,
+                            "title": title,
+                            "artist": artist,
+                        }
+
+                    for v in obj.values():
+                        result = find_first_track(v)
+                        if result:
+                            return result
                 elif isinstance(obj, list):
                     for item in obj:
-                        r = find_first_video_id(item)
-                        if r: return r
+                        result = find_first_track(item)
+                        if result:
+                            return result
                 return None
-                
-            return find_first_video_id(data)
+
+            return find_first_track(data)
         except Exception as e:
             logger.error(f"Failed to search song: {e}")
             return None
@@ -162,13 +235,15 @@ class PearWorker(QObject):
     current_song_updated = Signal(dict)
     
     # Feature signals
-    search_completed = Signal(str, str) # request_id, videoId
+    search_completed = Signal(str, object) # request_id, metadata
     queue_fetched = Signal(str, object)   # user_login, queue or None
     current_song_fetched = Signal(str, object) # user_login, song or None
     action_completed = Signal(str, str) # user_login, action
     action_failed = Signal(str, str, str) # user_login, action, safe message
     queue_operation_completed = Signal(str) # request_id
     queue_operation_failed = Signal(str, str) # request_id, safe message
+    clear_queue_completed = Signal()
+    clear_queue_failed = Signal(str)
     
     def __init__(self, base_url: str, timeout: int = 8, auth_client_id: str = "twitch-pear-song-requests"):
         super().__init__()
@@ -223,15 +298,31 @@ class PearWorker(QObject):
             self.client.command_pause()
 
     @Slot()
+    def command_toggle_play(self):
+        if self._is_running and self.client:
+            self.client.command_toggle_play()
+
+    @Slot()
     def command_next(self):
         if self._is_running and self.client:
             self.client.command_next()
 
+    @Slot()
+    def command_clear_queue(self):
+        if not self._is_running or not self.client:
+            self.clear_queue_failed.emit("Pear client is not running.")
+            return
+        if self.client.clear_queue():
+            self.clear_queue_completed.emit()
+            self.refresh_state()
+        else:
+            self.clear_queue_failed.emit("Pear Desktop is unavailable or returned an error.")
+
     @Slot(str, str)
     def request_search(self, request_id: str, query: str):
         if not self._is_running or not self.client: return
-        vid = self.client.search_song(query)
-        self.search_completed.emit(request_id, vid or "")
+        result = self.client.search_song(query) or {}
+        self.search_completed.emit(request_id, result)
 
     @Slot(str)
     def request_queue(self, user_login: str):

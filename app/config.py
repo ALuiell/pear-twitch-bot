@@ -34,6 +34,7 @@ class SongRequestsConfig:
     user_cooldown_seconds: int = 300
     insert_position: str = "INSERT_AT_END"
     reject_duplicates: bool = True
+    max_active_per_user: int | None = 1
     enable_queue_cmd: bool = True
     enable_current_cmd: bool = True
     enable_skip_cmd: bool = True

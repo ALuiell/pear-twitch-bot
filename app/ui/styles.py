@@ -141,7 +141,7 @@ def get_stylesheet(checkmark_path: str = "") -> str:
     QPushButton#PlayerBtn {{
         background: #1E293B;
         border: 1px solid #334155;
-        font-size: 14px;
+        font-size: 20px;
         border-radius: 20px; /* Round buttons */
         height: 40px;
         width: 40px;
