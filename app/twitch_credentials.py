@@ -5,41 +5,26 @@ from typing import Literal
 logger = logging.getLogger(__name__)
 
 CREDENTIAL_TARGET_NAME = "TwitchPearSongRequests/TwitchOAuth"
+CREDENTIAL_USERNAME = "TwitchBot"
 TokenStatus = Literal["ok", "missing", "unsupported_platform", "import_failed", "read_failed"]
 
 class TwitchCredentialStore:
-    """Securely stores the Twitch OAuth token using Windows Credential Manager."""
+    """Securely stores the Twitch OAuth token using Windows Credential Manager and Keyring."""
 
     @staticmethod
     def read_token() -> tuple[str | None, TokenStatus]:
         if sys.platform != "win32":
             return None, "unsupported_platform"
-        try:
-            import win32cred
-        except Exception as e:
-            logger.warning(f"Failed to import win32cred for Twitch token storage: {type(e).__name__}: {e}")
-            return None, "import_failed"
 
-        try:
-            cred = win32cred.CredRead(CREDENTIAL_TARGET_NAME, win32cred.CRED_TYPE_GENERIC)
-            blob = cred.get('CredentialBlob', b"")
-            if isinstance(blob, bytes):
-                token_str = blob.decode('utf-8', errors='ignore')
-                token_str = token_str.replace('\x00', '').strip()
-            else:
-                token_str = str(blob or "").strip()
+        token = TwitchCredentialStore._get_windows_credential()
+        if token:
+            return token, "ok"
 
-            if not token_str:
-                logger.warning("Twitch token entry was found in Credential Manager but it is empty.")
-                return None, "missing"
-            return token_str, "ok"
-        except Exception as e:
-            message = str(e).lower()
-            if "not found" in message or "element not found" in message:
-                logger.info("No Twitch token entry found in Windows Credential Manager.")
-                return None, "missing"
-            logger.warning(f"Failed to read Twitch token from Credential Manager: {type(e).__name__}: {e}")
-            return None, "read_failed"
+        token = TwitchCredentialStore._get_keyring_credential()
+        if token:
+            return token, "ok"
+
+        return None, "missing"
 
     @staticmethod
     def get_token() -> str | None:
@@ -48,30 +33,102 @@ class TwitchCredentialStore:
 
     @staticmethod
     def set_token(token: str) -> None:
-        if sys.platform != "win32":
+        if TwitchCredentialStore._set_windows_credential(token):
+            logger.debug("Token securely written to Windows Credential Manager.")
             return
-        try:
-            import win32cred
-            cred = {
-                'Type': win32cred.CRED_TYPE_GENERIC,
-                'TargetName': CREDENTIAL_TARGET_NAME,
-                'CredentialBlob': token,
-                'Persist': win32cred.CRED_PERSIST_LOCAL_MACHINE,
-                'UserName': 'TwitchBot'
-            }
-            win32cred.CredWrite(cred, 0)
-            logger.debug("Token securely written to Credential Manager.")
-        except Exception as e:
-            logger.error("Failed to write token to Credential Manager.")
-            raise
+        if TwitchCredentialStore._set_keyring_credential(token):
+            logger.debug("Token securely written to Keyring.")
+            return
+        logger.error("Failed to write token to any Credential Manager.")
+        raise RuntimeError("No secure credential storage backend is available.")
 
     @staticmethod
     def delete_token() -> None:
-        if sys.platform != "win32":
+        if TwitchCredentialStore._delete_windows_credential():
+            logger.debug("Token removed from Windows Credential Manager.")
             return
+        TwitchCredentialStore._delete_keyring_credential()
+        logger.debug("Token removed from Keyring (if present).")
+
+    @staticmethod
+    def _get_windows_credential() -> str:
+        if sys.platform != "win32":
+            return ""
         try:
             import win32cred
-            win32cred.CredDelete(CREDENTIAL_TARGET_NAME, win32cred.CRED_TYPE_GENERIC, 0)
-            logger.debug("Token removed from Credential Manager.")
+
+            cred = win32cred.CredRead(CREDENTIAL_TARGET_NAME, win32cred.CRED_TYPE_GENERIC)
+            blob = cred.get("CredentialBlob", b"")
+            if isinstance(blob, bytes):
+                token_str = blob.decode("utf-8", errors="ignore")
+                return token_str.replace("\x00", "").strip()
+            return str(blob or "").strip()
         except Exception as e:
-            logger.debug(f"Failed to delete token from Credential Manager (or not found).")
+            logger.debug(f"Failed to read from win32cred: {e}")
+            return ""
+
+    @staticmethod
+    def _set_windows_credential(token: str) -> bool:
+        if sys.platform != "win32":
+            return False
+        try:
+            import win32cred
+
+            win32cred.CredWrite(
+                {
+                    "Type": win32cred.CRED_TYPE_GENERIC,
+                    "TargetName": CREDENTIAL_TARGET_NAME,
+                    "UserName": CREDENTIAL_USERNAME,
+                    "CredentialBlob": token,
+                    "Persist": win32cred.CRED_PERSIST_LOCAL_MACHINE,
+                },
+                0,
+            )
+            return True
+        except Exception as e:
+            logger.debug(f"Failed to write to win32cred: {e}")
+            return False
+
+    @staticmethod
+    def _delete_windows_credential() -> bool:
+        if sys.platform != "win32":
+            return False
+        try:
+            import win32cred
+
+            win32cred.CredDelete(CREDENTIAL_TARGET_NAME, win32cred.CRED_TYPE_GENERIC, 0)
+            return True
+        except Exception as e:
+            logger.debug(f"Failed to delete from win32cred: {e}")
+            return False
+
+    @staticmethod
+    def _get_keyring_credential() -> str:
+        try:
+            import keyring
+
+            return keyring.get_password(CREDENTIAL_TARGET_NAME, CREDENTIAL_USERNAME) or ""
+        except Exception as e:
+            logger.debug(f"Failed to read from keyring: {e}")
+            return ""
+
+    @staticmethod
+    def _set_keyring_credential(token: str) -> bool:
+        try:
+            import keyring
+
+            keyring.set_password(CREDENTIAL_TARGET_NAME, CREDENTIAL_USERNAME, token)
+            return True
+        except Exception as e:
+            logger.debug(f"Failed to write to keyring: {e}")
+            return False
+
+    @staticmethod
+    def _delete_keyring_credential() -> None:
+        try:
+            import keyring
+
+            keyring.delete_password(CREDENTIAL_TARGET_NAME, CREDENTIAL_USERNAME)
+        except Exception as e:
+            logger.debug(f"Failed to delete from keyring: {e}")
+            pass
