@@ -96,6 +96,8 @@ class SongRequestService(QObject):
             return
         if cfg.access_tier == "vip_mod" and not is_mod_or_vip:
             return
+        if cfg.access_tier == "mods_only" and not msg.is_mod:
+            return
 
         now = time.monotonic()
         if now - self.global_last_success < cfg.global_cooldown_seconds:

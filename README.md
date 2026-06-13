@@ -54,6 +54,7 @@ Recommended Pear API settings:
 
 - `hostname`: `127.0.0.1`
 - `port`: `26538`
+- `authorization`: Disabled (recommended for simplicity; if enabled, you must approve the connection pop-up in Pear Desktop upon the first request)
 
 3. Run the app:
 

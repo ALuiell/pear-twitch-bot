@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QCheckBox, 
     QTextEdit, QSpinBox, QStackedWidget,
     QFormLayout, QFrame, QSizePolicy, QApplication,
-    QListWidget, QListWidgetItem
+    QListWidget, QListWidgetItem, QComboBox
 )
 from PySide6.QtCore import Slot, Qt, QObject, Signal
 
@@ -316,6 +316,10 @@ class MainWindow(QMainWindow):
         self.txt_max_active.setPlaceholderText("empty = unlimited")
         self.txt_max_active.textChanged.connect(self._mark_settings_dirty)
         
+        self.cmb_access_tier = QComboBox()
+        self.cmb_access_tier.addItems(["Everyone", "Subscribers, VIPs & Mods", "VIPs & Mods Only", "Moderators Only"])
+        self.cmb_access_tier.currentTextChanged.connect(self._mark_settings_dirty)
+        
         form_layout.addRow("", self.chk_enabled)
         form_layout.addRow("", self.chk_queue)
         form_layout.addRow("", self.chk_current)
@@ -325,6 +329,7 @@ class MainWindow(QMainWindow):
         form_layout.addRow("Global Cooldown:", self.spin_global)
         form_layout.addRow("User Cooldown:", self.spin_user)
         form_layout.addRow("Max Active Per User:", self.txt_max_active)
+        form_layout.addRow("Access Tier:", self.cmb_access_tier)
         
         req_card_layout.addLayout(form_layout)
         settings_actions = QHBoxLayout()
@@ -403,6 +408,18 @@ class MainWindow(QMainWindow):
         self.spin_global.setValue(cfg.global_cooldown_seconds)
         self.spin_user.setValue(cfg.user_cooldown_seconds)
         self.txt_max_active.setText("" if cfg.max_active_per_user is None else str(cfg.max_active_per_user))
+        
+        # Sync access tier
+        tier = cfg.access_tier
+        if tier == "subs_only":
+            self.cmb_access_tier.setCurrentText("Subscribers, VIPs & Mods")
+        elif tier == "vip_mod":
+            self.cmb_access_tier.setCurrentText("VIPs & Mods Only")
+        elif tier == "mods_only":
+            self.cmb_access_tier.setCurrentText("Moderators Only")
+        else:
+            self.cmb_access_tier.setCurrentText("Everyone")
+
         self._syncing_ui = False
         self._set_settings_dirty(False)
         
@@ -656,6 +673,18 @@ class MainWindow(QMainWindow):
             except ValueError:
                 parsed_limit = 1
             cfg.max_active_per_user = None if parsed_limit <= 0 else parsed_limit
+            
+        # Save access tier
+        selected_tier = self.cmb_access_tier.currentText()
+        if selected_tier == "Subscribers, VIPs & Mods":
+            cfg.access_tier = "subs_only"
+        elif selected_tier == "VIPs & Mods Only":
+            cfg.access_tier = "vip_mod"
+        elif selected_tier == "Moderators Only":
+            cfg.access_tier = "mods_only"
+        else:
+            cfg.access_tier = "everyone"
+            
         save_config(self.config)
         self._set_settings_dirty(False)
         self.append_log("info", "Settings saved.")

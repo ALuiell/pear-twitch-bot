@@ -251,6 +251,7 @@ class PearWorker(QObject):
         self.timeout = timeout
         self.auth_client_id = auth_client_id
         self.client: PearClient | None = None
+        self.is_connected = False
         self._is_running = True
 
     @Slot()
@@ -264,14 +265,21 @@ class PearWorker(QObject):
         if not self._is_running or not self.client: return
         is_up = self.client.is_available()
         if is_up:
+            self.is_connected = True
             self.state_changed.emit("connected")
             self.refresh_state()
         else:
+            self.is_connected = False
             self.state_changed.emit("unavailable")
+            self.refresh_state()
 
     @Slot()
     def refresh_state(self):
         if not self._is_running or not self.client: return
+        if not self.is_connected:
+            self.queue_updated.emit(None)
+            self.current_song_updated.emit({})
+            return
         self.queue_updated.emit(self.client.get_queue())
         song = self.client.get_current_song()
         self.current_song_updated.emit(song if song is not None else {})

@@ -147,7 +147,7 @@ class TwitchIrcWorker(QObject):
             text=text.strip(),
             badges=badges,
             is_mod="moderator" in badges or tags.get("mod") == "1" or "broadcaster" in badges,
-            is_subscriber="subscriber" in badges,
+            is_subscriber="subscriber" in badges or "founder" in badges,
             is_vip="vip" in badges
         )
         self.chat_message.emit(msg)
