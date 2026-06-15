@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QCheckBox, 
     QTextEdit, QSpinBox, QStackedWidget,
     QFormLayout, QFrame, QSizePolicy, QApplication,
-    QListWidget, QListWidgetItem, QComboBox
+    QListWidget, QListWidgetItem, QComboBox, QScrollArea
 )
 from PySide6.QtCore import Slot, Qt, QObject, Signal
 
@@ -279,6 +279,9 @@ class MainWindow(QMainWindow):
         # ------------------
         # Tab 2: Settings Page
         # ------------------
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setFrameShape(QFrame.NoFrame)
         settings_widget = QWidget()
         settings_layout = QVBoxLayout(settings_widget)
         settings_layout.setContentsMargins(0, 0, 0, 0)
@@ -290,19 +293,19 @@ class MainWindow(QMainWindow):
         form_layout.setSpacing(15)
         form_layout.setContentsMargins(0, 8, 0, 8)
         
-        self.chk_enabled = QCheckBox("Enable !song commands")
+        self.chk_enabled = QCheckBox("Enable song request commands")
         self.chk_enabled.toggled.connect(self._mark_settings_dirty)
         
-        self.chk_queue = QCheckBox("Enable !queue command")
+        self.chk_queue = QCheckBox("Enable queue command")
         self.chk_queue.toggled.connect(self._mark_settings_dirty)
         
-        self.chk_current = QCheckBox("Enable !current command")
+        self.chk_current = QCheckBox("Enable current command")
         self.chk_current.toggled.connect(self._mark_settings_dirty)
         
-        self.chk_skip = QCheckBox("Enable !skip command")
+        self.chk_skip = QCheckBox("Enable skip command")
         self.chk_skip.toggled.connect(self._mark_settings_dirty)
         
-        self.chk_remove = QCheckBox("Enable !remove command")
+        self.chk_remove = QCheckBox("Enable remove command")
         self.chk_remove.toggled.connect(self._mark_settings_dirty)
         
         self.txt_channel = QLineEdit()
@@ -337,6 +340,19 @@ class MainWindow(QMainWindow):
         form_layout.addRow("User Cooldown:", self.spin_user)
         form_layout.addRow("Max Active Per User:", self.txt_max_active)
         form_layout.addRow("Access Tier:", self.cmb_access_tier)
+
+        command_fields = [
+            ("Song Command:", "song"), ("Queue Command:", "queue"),
+            ("Current Command:", "current"), ("Skip Command:", "skip"),
+            ("Remove Command:", "remove"),
+        ]
+        self.command_inputs = {}
+        for label, name in command_fields:
+            field = QLineEdit()
+            field.setPlaceholderText(f"!{name}")
+            field.textChanged.connect(self._mark_settings_dirty)
+            self.command_inputs[name] = field
+            form_layout.addRow(label, field)
         
         req_card_layout.addLayout(form_layout)
         settings_actions = QHBoxLayout()
@@ -348,7 +364,39 @@ class MainWindow(QMainWindow):
         settings_actions.addWidget(self.btn_save_settings)
         req_card_layout.addLayout(settings_actions)
         settings_layout.addWidget(req_card)
-        self.stacked_widget.addWidget(settings_widget)
+
+        response_card, response_layout = self._create_card("Chat Response Templates")
+        help_label = QLabel("Available placeholders are shown in each field. Unknown placeholders are left unchanged.")
+        help_label.setWordWrap(True)
+        response_layout.addWidget(help_label)
+        response_form = QFormLayout()
+        response_form.setLabelAlignment(Qt.AlignRight)
+        response_form.setSpacing(10)
+        response_fields = [
+            ("Remove Usage", "remove_usage", "{user}, {remove_command}"),
+            ("Cooldown", "cooldown", "{user}"), ("Single Limit", "limit_single", "{user}, {limit}"),
+            ("Request Limit", "limit_multiple", "{user}, {limit}"), ("Invalid Source", "invalid_source", "{user}"),
+            ("Duplicate", "duplicate", "{user}"), ("Added Next", "added_next", "{user}, {track}, {position}"),
+            ("Added Position", "added_position", "{user}, {track}, {position}"),
+            ("Search Not Found", "search_not_found", "{user}"), ("Pear Unavailable", "pear_unavailable", "{user}"),
+            ("Nothing Playing", "nothing_playing", "{user}"), ("Current Song", "current", "{user}, {artist}, {title}"),
+            ("Skip Success", "skip_success", "{user}"), ("Remove Success", "remove_success", "{user}"),
+            ("Skip Failed", "skip_failed", "{user}, {error}"), ("Remove Failed", "remove_failed", "{user}, {error}"),
+            ("Empty Queue", "queue_empty", "{user}"), ("Queue", "queue", "{user}, {queue}"),
+            ("Invalid Position", "remove_invalid_position", "{user}, {position}"),
+            ("Removed Item", "remove_item", "{user}, {position}, {track}"),
+        ]
+        self.response_inputs = {}
+        for label, name, placeholders in response_fields:
+            field = QLineEdit()
+            field.setPlaceholderText(placeholders)
+            field.textChanged.connect(self._mark_settings_dirty)
+            self.response_inputs[name] = field
+            response_form.addRow(f"{label}:", field)
+        response_layout.addLayout(response_form)
+        settings_layout.addWidget(response_card)
+        settings_scroll.setWidget(settings_widget)
+        self.stacked_widget.addWidget(settings_scroll)
         
         # ------------------
         # Tab 3: Logs Page
@@ -415,6 +463,10 @@ class MainWindow(QMainWindow):
         self.spin_global.setValue(cfg.global_cooldown_seconds)
         self.spin_user.setValue(cfg.user_cooldown_seconds)
         self.txt_max_active.setText("" if cfg.max_active_per_user is None else str(cfg.max_active_per_user))
+        for name, field in self.command_inputs.items():
+            field.setText(getattr(cfg.commands, name))
+        for name, field in self.response_inputs.items():
+            field.setText(getattr(cfg.responses, name))
         
         # Sync access tier
         tier = cfg.access_tier
@@ -674,6 +726,14 @@ class MainWindow(QMainWindow):
         cfg.enable_remove_cmd = self.chk_remove.isChecked()
         cfg.global_cooldown_seconds = self.spin_global.value()
         cfg.user_cooldown_seconds = self.spin_user.value()
+        for name, field in self.command_inputs.items():
+            value = field.text().strip()
+            if value and not value.startswith("!"):
+                value = f"!{value}"
+            setattr(cfg.commands, name, value)
+            field.setText(value)
+        for name, field in self.response_inputs.items():
+            setattr(cfg.responses, name, field.text())
         raw_limit = self.txt_max_active.text().strip()
         if not raw_limit:
             cfg.max_active_per_user = None

@@ -19,6 +19,11 @@ ALLOWED_HOSTS = {
 }
 
 
+class _TemplateValues(dict):
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
 @dataclass
 class ViewerQueueEntry:
     entry_id: str
@@ -71,27 +76,27 @@ class SongRequestService(QObject):
 
         is_mod_or_vip = msg.is_mod or msg.is_vip or "broadcaster" in msg.badges
 
-        if command == "!queue":
+        if command == self._command(cfg.commands.queue):
             if cfg.enable_queue_cmd:
                 self._send_viewer_queue(user_login)
             return
-        if command == "!current":
+        if command == self._command(cfg.commands.current):
             if cfg.enable_current_cmd:
                 self.request_pear_current.emit(user_login)
             return
-        if command == "!skip":
+        if command == self._command(cfg.commands.skip):
             if cfg.enable_skip_cmd and is_mod_or_vip:
                 self.request_pear_skip.emit(user_login)
             return
-        if command == "!remove":
+        if command == self._command(cfg.commands.remove):
             if cfg.enable_remove_cmd and is_mod_or_vip:
                 try:
                     self._remove_viewer_queue_entry(user_login, int(args.strip()))
                 except ValueError:
-                    self.send_chat_message.emit(f"@{user_login}, usage: !remove <number>")
+                    self._respond("remove_usage", user=user_login, remove_command=self._display_command(cfg.commands.remove))
             return
 
-        if command != cfg.command.lower() or not args:
+        if command != self._command(cfg.commands.song) or not args:
             return
 
         if cfg.access_tier == "subs_only" and not (msg.is_subscriber or is_mod_or_vip):
@@ -108,17 +113,17 @@ class SongRequestService(QObject):
 
         last_user = self.user_last_success.get(user_login, 0)
         if now - last_user < cfg.user_cooldown_seconds:
-            self.send_chat_message.emit(f"@{user_login}, please wait before requesting another song.")
+            self._respond("cooldown", user=user_login)
             return
 
         try:
             video_id = self._extract_video_id(args)
         except ValueError as exc:
             if self._user_has_reached_limit(user_login):
-                self.send_chat_message.emit(self._limit_message(user_login))
+                self._send_limit_message(user_login)
                 return
             if self._looks_like_url(args):
-                self.send_chat_message.emit(f"@{user_login}, only YouTube links or plain text search queries are allowed.")
+                self._respond("invalid_source", user=user_login)
                 self.log_message.emit("debug", f"Rejected invalid URL from {user_login}: {exc}")
                 return
             request_id = f"search_{user_login}_{time.time()}"
@@ -132,11 +137,11 @@ class SongRequestService(QObject):
 
     def _queue_viewer_track(self, user_login: str, video_id: str, label: str, artist: str = "", title: str = ""):
         if self.config.song_requests.reject_duplicates and self._video_id_is_known(video_id):
-            self.send_chat_message.emit(f"@{user_login}, this track is already queued or playing.")
+            self._respond("duplicate", user=user_login)
             return
 
         if self._user_has_reached_limit(user_login):
-            self.send_chat_message.emit(self._limit_message(user_login))
+            self._send_limit_message(user_login)
             return
 
         entry = ViewerQueueEntry(
@@ -155,9 +160,9 @@ class SongRequestService(QObject):
         position = len(self.viewer_queue)
         track_display = self._format_track_display(entry, bracketed=True)
         if position == 1:
-            self.send_chat_message.emit(f"@{user_login}, added {track_display} to the viewer queue. You're up next.")
+            self._respond("added_next", user=user_login, track=track_display, position=position)
         else:
-            self.send_chat_message.emit(f"@{user_login}, added {track_display} to the viewer queue at position {position}.")
+            self._respond("added_position", user=user_login, track=track_display, position=position)
 
         self.log_message.emit("info", f"Queued viewer track {video_id} for {user_login}")
         self._dispatch_next_viewer_track()
@@ -188,7 +193,7 @@ class SongRequestService(QObject):
         metadata = result if isinstance(result, dict) else {}
         video_id = str(metadata.get("videoId", "")).strip()
         if not video_id:
-            self.send_chat_message.emit(f"@{user_login}, could not find any track for your search.")
+            self._respond("search_not_found", user=user_login)
             return
 
         artist = str(metadata.get("artist", "")).strip()
@@ -204,16 +209,16 @@ class SongRequestService(QObject):
     @Slot(str, object)
     def handle_current_song_fetched(self, user_login: str, song: object):
         if song is None:
-            self.send_chat_message.emit(f"@{user_login}, Pear Desktop is currently unavailable.")
+            self._respond("pear_unavailable", user=user_login)
             return
 
         if not isinstance(song, dict) or not song:
-            self.send_chat_message.emit(f"@{user_login}, nothing is currently playing.")
+            self._respond("nothing_playing", user=user_login)
             return
 
         title = song.get("title", "")
         artist = song.get("artist", "")
-        self.send_chat_message.emit(f"@{user_login}, currently playing: {artist} - {title}")
+        self._respond("current", user=user_login, artist=artist, title=title)
 
     @Slot()
     def command_resync_with_pear(self):
@@ -250,16 +255,16 @@ class SongRequestService(QObject):
     @Slot(str, str)
     def handle_action_completed(self, user_login: str, action: str):
         if action == "skip":
-            self.send_chat_message.emit(f"@{user_login}, track skipped!")
+            self._respond("skip_success", user=user_login)
         elif action.startswith("remove"):
-            self.send_chat_message.emit(f"@{user_login}, track removed from queue!")
+            self._respond("remove_success", user=user_login)
 
     @Slot(str, str, str)
     def handle_action_failed(self, user_login: str, action: str, error: str):
         if action == "skip":
-            self.send_chat_message.emit(f"@{user_login}, failed to skip the track: {error}")
+            self._respond("skip_failed", user=user_login, error=error)
         elif action == "remove":
-            self.send_chat_message.emit(f"@{user_login}, failed to remove the track: {error}")
+            self._respond("remove_failed", user=user_login, error=error)
 
     @Slot(str)
     def handle_queue_operation_completed(self, request_id: str):
@@ -320,22 +325,22 @@ class SongRequestService(QObject):
 
     def _send_viewer_queue(self, user_login: str):
         if not self.viewer_queue:
-            self.send_chat_message.emit(f"@{user_login}, the viewer queue is currently empty.")
+            self._respond("queue_empty", user=user_login)
             return
 
         preview = []
         for index, entry in enumerate(self.viewer_queue[:3], start=1):
             label = self._format_queue_preview(entry)
             preview.append(f"{index}. {label}")
-        self.send_chat_message.emit(f"@{user_login}, viewer queue: {' | '.join(preview)}")
+        self._respond("queue", user=user_login, queue=" | ".join(preview))
 
     def _remove_viewer_queue_entry(self, user_login: str, position: int):
         if position < 1 or position > len(self.viewer_queue):
-            self.send_chat_message.emit(f"@{user_login}, there is no viewer queue item at position {position}.")
+            self._respond("remove_invalid_position", user=user_login, position=position)
             return
 
         entry = self.viewer_queue.pop(position - 1)
-        self.send_chat_message.emit(f"@{user_login}, removed viewer queue item {position}: {entry.label}")
+        self._respond("remove_item", user=user_login, position=position, track=self._format_track_display(entry))
 
         pear_index = self._find_video_index_in_pear_queue(entry.video_id)
         if pear_index is not None:
@@ -358,11 +363,29 @@ class SongRequestService(QObject):
         pending_search_count = sum(1 for pending_user, _ in self.pending_searches.values() if pending_user == user_login)
         return queue_count + pending_search_count
 
-    def _limit_message(self, user_login: str) -> str:
+    def _send_limit_message(self, user_login: str):
         limit = self.config.song_requests.max_active_per_user
         if limit == 1:
-            return f"@{user_login}, you already have a pending request."
-        return f"@{user_login}, you already reached the active request limit."
+            self._respond("limit_single", user=user_login, limit=limit)
+        else:
+            self._respond("limit_multiple", user=user_login, limit=limit or "")
+
+    def _respond(self, template_name: str, **values):
+        template = getattr(self.config.song_requests.responses, template_name)
+        try:
+            message = template.format_map(_TemplateValues(values)).strip()
+        except (ValueError, AttributeError) as exc:
+            self.log_message.emit("warning", f"Invalid response template '{template_name}': {exc}")
+            message = str(template).strip()
+        if message:
+            self.send_chat_message.emit(message)
+
+    def _command(self, value: str) -> str:
+        return self._display_command(value).lower()
+
+    def _display_command(self, value: str) -> str:
+        command = value.strip().split(maxsplit=1)[0] if value.strip() else ""
+        return command if not command or command.startswith("!") else f"!{command}"
 
     def _video_id_is_queued(self, video_id: str) -> bool:
         return any(entry.video_id == video_id for entry in self.viewer_queue)

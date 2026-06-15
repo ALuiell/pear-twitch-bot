@@ -26,9 +26,41 @@ class PearConfig:
     auth_client_id: str = "twitch-pear-song-requests"
 
 @dataclass
+class CommandNamesConfig:
+    song: str = "!song"
+    queue: str = "!queue"
+    current: str = "!current"
+    skip: str = "!skip"
+    remove: str = "!remove"
+
+@dataclass
+class ResponseTemplatesConfig:
+    remove_usage: str = "@{user}, usage: {remove_command} <number>"
+    cooldown: str = "@{user}, please wait before requesting another song."
+    limit_single: str = "@{user}, you already have a pending request."
+    limit_multiple: str = "@{user}, you already reached the active request limit."
+    invalid_source: str = "@{user}, only YouTube links or plain text search queries are allowed."
+    duplicate: str = "@{user}, this track is already queued or playing."
+    added_next: str = "@{user}, added {track} to the viewer queue. You're up next."
+    added_position: str = "@{user}, added {track} to the viewer queue at position {position}."
+    search_not_found: str = "@{user}, could not find any track for your search."
+    pear_unavailable: str = "@{user}, Pear Desktop is currently unavailable."
+    nothing_playing: str = "@{user}, nothing is currently playing."
+    current: str = "@{user}, currently playing: {artist} - {title}"
+    skip_success: str = "@{user}, track skipped!"
+    remove_success: str = "@{user}, track removed from queue!"
+    skip_failed: str = "@{user}, failed to skip the track: {error}"
+    remove_failed: str = "@{user}, failed to remove the track: {error}"
+    queue_empty: str = "@{user}, the viewer queue is currently empty."
+    queue: str = "@{user}, viewer queue: {queue}"
+    remove_invalid_position: str = "@{user}, there is no viewer queue item at position {position}."
+    remove_item: str = "@{user}, removed viewer queue item {position}: {track}"
+
+@dataclass
 class SongRequestsConfig:
     enabled: bool = True
-    command: str = "!song"
+    commands: CommandNamesConfig = field(default_factory=CommandNamesConfig)
+    responses: ResponseTemplatesConfig = field(default_factory=ResponseTemplatesConfig)
     access_tier: str = "everyone"
     global_cooldown_seconds: int = 5
     user_cooldown_seconds: int = 300
@@ -56,11 +88,19 @@ class AppConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AppConfig":
+        song_data = dict(data.get("song_requests", {}))
+        command_data = dict(song_data.pop("commands", {}))
+        legacy_song_command = song_data.pop("command", None)
+        if legacy_song_command and "song" not in command_data:
+            command_data["song"] = legacy_song_command
+        response_data = dict(song_data.pop("responses", {}))
+        song_data["commands"] = CommandNamesConfig(**command_data)
+        song_data["responses"] = ResponseTemplatesConfig(**response_data)
         return cls(
             version=data.get("version", 1),
             twitch=TwitchConfig(**data.get("twitch", {})),
             pear=PearConfig(**data.get("pear", {})),
-            song_requests=SongRequestsConfig(**data.get("song_requests", {})),
+            song_requests=SongRequestsConfig(**song_data),
             ui=UiConfig(**data.get("ui", {}))
         )
 
